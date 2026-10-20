@@ -17,6 +17,10 @@ switch -- $mode {
     async   { set fast_mhz 395.833; set async_mode 1 }
     default { error "MODE must be sync or async, got '$mode'" }
 }
+set knn_ip   [file normalize $root/../mnist_knn/hls_knn/sol1/impl/ip]
+if {![file exists $knn_ip/component.xml]} {
+    error "k-NN kernel IP not found at $knn_ip; run vitis_hls -f kernel/run_hls.tcl in mnist_knn/ first"
+}
 set build_dir $root/build/$mode
 set rpt_dir   $build_dir/reports
 
@@ -25,6 +29,8 @@ file mkdir $rpt_dir
 file delete -force $build_dir/$proj_name.bit $build_dir/$proj_name.bit.bin $build_dir/$proj_name.xsa
 create_project $proj_name $build_dir/vivado -part xck26-sfvc784-2LV-c -force
 set_property board_part xilinx.com:kr260_som:part0:1.1 [current_project]
+set_property ip_repo_paths [list $knn_ip] [current_project]
+update_ip_catalog
 set_property board_connections {som240_1_connector xilinx.com:kr260_carrier:som240_1_connector:1.0 som240_2_connector xilinx.com:kr260_carrier:som240_2_connector:1.0} [current_project]
 
 add_files -norecurse [glob $root/rtl/*.v]
@@ -39,12 +45,14 @@ create_bd_design $proj_name
 
 set ps [create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e zynq_ultra_ps_e_0]
 apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e -config {apply_board_preset "1"} $ps
-# One AXI master (HPM0 FPD) and a 100 MHz fabric clock; disable the other masters
-# so their clock pins don't need driving.
+# One AXI master (HPM0 FPD), one AXI slave into DDR (HP0 FPD, for the k-NN
+# kernel) and a 100 MHz fabric clock; disable the other masters so their
+# clock pins don't need driving.
 set_property -dict [list \
     CONFIG.PSU__USE__M_AXI_GP0 1 \
     CONFIG.PSU__USE__M_AXI_GP1 0 \
     CONFIG.PSU__USE__M_AXI_GP2 0 \
+    CONFIG.PSU__USE__S_AXI_GP2 1 \
     CONFIG.PSU__FPGA_PL0_ENABLE 1 \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 100 \
 ] $ps
@@ -66,13 +74,30 @@ set_property -dict [list \
 set rst_s [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_slow]
 set rst_f [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_fast]
 set sc    [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smartconnect_0]
-set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1] $sc
+set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 2 CONFIG.NUM_CLKS 2] $sc
 set core  [create_bd_cell -type module -reference cdc_lab_top core_0]
 set_property CONFIG.ASYNC_MODE $async_mode $core
 
-connect_bd_net [get_bd_pins $ps/pl_clk0] [get_bd_pins $cw/clk_in1]
+# k-NN kernel on its own 200 MHz clock from a second MMCM, so adding it
+# doesn't change clk_wiz_0's VCO (and the async-mode 95/24 ratio).
+set cw2 [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_1]
+set_property -dict [list \
+    CONFIG.PRIM_SOURCE Global_buffer \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ 200.000 \
+    CONFIG.RESET_TYPE ACTIVE_LOW \
+    CONFIG.RESET_PORT resetn \
+    CONFIG.USE_LOCKED true \
+] $cw2
+set rst_k [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_knn]
+set knn   [create_bd_cell -type ip -vlnv jeff:hls:knn:1.0 knn_0]
+set sc2   [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smartconnect_1]
+set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1] $sc2
+
+connect_bd_net [get_bd_pins $ps/pl_clk0] [get_bd_pins $cw/clk_in1] [get_bd_pins $cw2/clk_in1]
 connect_bd_net [get_bd_pins $ps/pl_resetn0] \
     [get_bd_pins $cw/resetn] \
+    [get_bd_pins $cw2/resetn] \
+    [get_bd_pins $rst_k/ext_reset_in] \
     [get_bd_pins $rst_s/ext_reset_in] \
     [get_bd_pins $rst_f/ext_reset_in]
 connect_bd_net [get_bd_pins $cw/locked] \
@@ -93,6 +118,20 @@ connect_bd_net [get_bd_pins $cw/clk_out2] \
     [get_bd_pins $core/clk_fast]
 connect_bd_net [get_bd_pins $rst_f/peripheral_aresetn] [get_bd_pins $core/fast_resetn]
 
+connect_bd_net [get_bd_pins $cw2/locked] [get_bd_pins $rst_k/dcm_locked]
+connect_bd_net [get_bd_pins $cw2/clk_out1] \
+    [get_bd_pins $rst_k/slowest_sync_clk] \
+    [get_bd_pins $knn/ap_clk] \
+    [get_bd_pins $sc/aclk1] \
+    [get_bd_pins $sc2/aclk] \
+    [get_bd_pins $ps/saxihp0_fpd_aclk]
+connect_bd_net [get_bd_pins $rst_k/peripheral_aresetn] \
+    [get_bd_pins $knn/ap_rst_n] \
+    [get_bd_pins $sc2/aresetn]
+connect_bd_intf_net [get_bd_intf_pins $sc/M01_AXI] [get_bd_intf_pins $knn/s_axi_control]
+connect_bd_intf_net [get_bd_intf_pins $knn/m_axi_gmem] [get_bd_intf_pins $sc2/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins $sc2/M00_AXI] [get_bd_intf_pins $ps/S_AXI_HP0_FPD]
+
 connect_bd_intf_net [get_bd_intf_pins $ps/M_AXI_HPM0_FPD] [get_bd_intf_pins $sc/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins $sc/M00_AXI] [get_bd_intf_pins $core/s_axi]
 create_bd_port -dir O -from 1 -to 0 led
@@ -101,6 +140,12 @@ connect_bd_net [get_bd_pins $core/led] [get_bd_ports led]
 assign_bd_address -offset 0xA0000000 -range 4K \
     -target_address_space [get_bd_addr_spaces $ps/Data] \
     [get_bd_addr_segs $core/s_axi/reg0]
+assign_bd_address -offset 0xA0010000 -range 64K \
+    -target_address_space [get_bd_addr_spaces $ps/Data] \
+    [get_bd_addr_segs $knn/s_axi_control/Reg]
+# The kernel reaches DDR low (0-2 GiB), where the CMA buffer lives.
+assign_bd_address -target_address_space [get_bd_addr_spaces $knn/Data_m_axi_gmem] \
+    [get_bd_addr_segs -filter {NAME =~ *HP0_DDR_LOW*} $ps/SAXIGP2/*]
 
 validate_bd_design
 save_bd_design
