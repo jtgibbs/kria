@@ -1,5 +1,6 @@
 // cdc_lab top level: AXI4-Lite register block in the slow clock domain, a
-// free-running 64-bit counter, the user LEDs, and the CDC experiments.
+// free-running 64-bit counter in each clock domain, the user LEDs, the CDC
+// experiments (step 2) and the fast-counter readout methods (step 3).
 //
 // Register map (32-bit registers, byte offsets):
 //   0x00  ID            RO  0xCDC0_0002
@@ -22,6 +23,17 @@
 //   0x3C  T4_ERR_BAD    RO   |
 //   0x40  T4_ERR_GOOD   RO   |
 //   0x44  T4_RECV_GOOD  RO  /
+//   0x48  SNAP          WO  write 1: capture the slow counter and every readout
+//                           method's view of the fast counter in one clk_s cycle
+//   0x50  SNAP_SLOW     RO  64-bit slow counter            (lo at +0, hi at +4)
+//   0x58  SNAP_M0       RO  64-bit fast count, raw sample   \
+//   0x60  SNAP_M1       RO  64-bit fast count, 2FF per bit   |
+//   0x68  SNAP_M2       RO  64-bit fast count, gray code     |  see fast_readout.v
+//   0x70  SNAP_M3       RO  64-bit fast count, handshake     |
+//   0x78  SNAP_M4       RO  64-bit fast count, async FIFO   /
+//   0x80  M0_ERR .. 0x90 M4_ERR   RO  readout check failures, one per method
+//   0x94  M3_UPDATES    RO  handshake updates received
+//   0x98  M4_POPS       RO  FIFO entries received
 //
 // Read COUNT_LO then COUNT_HI to get a consistent 64-bit value.
 
@@ -91,6 +103,15 @@ module cdc_lab_top #(
     localparam [11:0] REG_T4_ERR_BAD   = 12'h03C;
     localparam [11:0] REG_T4_ERR_GOOD  = 12'h040;
     localparam [11:0] REG_T4_RECV_GOOD = 12'h044;
+    localparam [11:0] REG_SNAP         = 12'h048;
+    localparam [11:0] REG_SNAP_BASE    = 12'h050;  // 6 x 64-bit, 0x50..0x7C
+    localparam [11:0] REG_M0_ERR       = 12'h080;
+    localparam [11:0] REG_M1_ERR       = 12'h084;
+    localparam [11:0] REG_M2_ERR       = 12'h088;
+    localparam [11:0] REG_M3_ERR       = 12'h08C;
+    localparam [11:0] REG_M4_ERR       = 12'h090;
+    localparam [11:0] REG_M3_UPDATES   = 12'h094;
+    localparam [11:0] REG_M4_POPS      = 12'h098;
 
     wire clk = s_axi_aclk;
     wire rst = ~s_axi_aresetn;
@@ -101,6 +122,15 @@ module cdc_lab_top #(
     reg        clear;
     reg        led_sw;
     reg        test_en, test_clr;
+    reg        snap;
+
+    // ---------------- fast-domain free-running counter ----------------
+    wire rst_fast = ~fast_resetn;
+    reg [63:0] fcount;
+    always @(posedge clk_fast) begin
+        if (rst_fast) fcount <= 64'd0;
+        else          fcount <= fcount + 64'd1;
+    end
 
     // ---------------- CDC experiments ----------------
     wire [31:0] fast_count;
@@ -111,7 +141,7 @@ module cdc_lab_top #(
     wire        heartbeat_fast;
 
     cdc_tests #(.T1_DELAY_LUTS(ASYNC_MODE ? 8 : 2)) u_tests (
-        .clk_s(clk), .rst_s(rst), .clk_f(clk_fast), .rst_f(~fast_resetn),
+        .clk_s(clk), .rst_s(rst), .clk_f(clk_fast), .rst_f(rst_fast), .fcount(fcount),
         .en_s(test_en), .clr_s(test_clr),
         .fast_count(fast_count),
         .t1_err_bad(t1_err_bad), .t1_err_good(t1_err_good),
@@ -120,6 +150,31 @@ module cdc_lab_top #(
         .t4_err_bad(t4_err_bad), .t4_err_good(t4_err_good), .t4_recv_good(t4_recv_good),
         .heartbeat_f(heartbeat_fast)
     );
+
+    // ---------------- fast counter readout methods ----------------
+    wire [63:0] m0_val, m1_val, m2_val, m3_val, m4_val;
+    wire [31:0] m0_err, m1_err, m2_err, m3_err, m4_err, m3_updates, m4_pops;
+
+    fast_readout u_readout (
+        .clk_s(clk), .rst_s(rst), .clk_f(clk_fast), .rst_f(rst_fast), .fcount(fcount),
+        .en_s(test_en), .clr_s(test_clr),
+        .m0_val(m0_val), .m1_val(m1_val), .m2_val(m2_val), .m3_val(m3_val), .m4_val(m4_val),
+        .m0_err(m0_err), .m1_err(m1_err), .m2_err(m2_err), .m3_err(m3_err), .m4_err(m4_err),
+        .m3_updates(m3_updates), .m4_pops(m4_pops)
+    );
+
+    // Snapshot: index 0 = slow counter, 1..5 = M0..M4.
+    reg [63:0] snap_val [0:5];
+    always @(posedge clk) begin
+        if (snap) begin
+            snap_val[0] <= count;
+            snap_val[1] <= m0_val;
+            snap_val[2] <= m1_val;
+            snap_val[3] <= m2_val;
+            snap_val[4] <= m3_val;
+            snap_val[5] <= m4_val;
+        end
+    end
 
     // UF1: ~0.75 Hz slow-domain heartbeat. UF2: fast-domain heartbeat, or on.
     // Both drive pins directly; the LED ports are false-pathed.
@@ -154,8 +209,10 @@ module cdc_lab_top #(
             led_sw       <= 1'b0;
             test_en      <= 1'b0;
             test_clr     <= 1'b0;
+            snap         <= 1'b0;
         end else begin
             clear <= 1'b0;
+            snap  <= 1'b0;
 
             if (s_axi_awvalid && s_axi_awready) begin
                 aw_held <= 1'b1;
@@ -180,6 +237,8 @@ module cdc_lab_top #(
                             if (w_strb[i]) scratch[8*i +: 8] <= w_data[8*i +: 8];
                     REG_LED:
                         if (w_strb[0]) led_sw <= w_data[0];
+                    REG_SNAP:
+                        if (w_strb[0]) snap <= w_data[0];
                     default: ;
                 endcase
                 aw_held      <= 1'b0;
@@ -224,7 +283,20 @@ module cdc_lab_top #(
                 REG_T4_ERR_BAD:   s_axi_rdata <= t4_err_bad;
                 REG_T4_ERR_GOOD:  s_axi_rdata <= t4_err_good;
                 REG_T4_RECV_GOOD: s_axi_rdata <= t4_recv_good;
-                default:          s_axi_rdata <= 32'd0;
+                REG_M0_ERR:       s_axi_rdata <= m0_err;
+                REG_M1_ERR:       s_axi_rdata <= m1_err;
+                REG_M2_ERR:       s_axi_rdata <= m2_err;
+                REG_M3_ERR:       s_axi_rdata <= m3_err;
+                REG_M4_ERR:       s_axi_rdata <= m4_err;
+                REG_M3_UPDATES:   s_axi_rdata <= m3_updates;
+                REG_M4_POPS:      s_axi_rdata <= m4_pops;
+                default:
+                    if (s_axi_araddr >= REG_SNAP_BASE && s_axi_araddr < REG_SNAP_BASE + 12'd48)
+                        s_axi_rdata <= s_axi_araddr[2]
+                            ? snap_val[(s_axi_araddr - REG_SNAP_BASE) >> 3][63:32]
+                            : snap_val[(s_axi_araddr - REG_SNAP_BASE) >> 3][31:0];
+                    else
+                        s_axi_rdata <= 32'd0;
             endcase
         end else if (s_axi_rvalid && s_axi_rready) begin
             s_axi_rvalid <= 1'b0;

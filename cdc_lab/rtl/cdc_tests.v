@@ -36,6 +36,7 @@ module cdc_tests #(
     input  wire        rst_s,
     input  wire        clk_f,
     input  wire        rst_f,
+    input  wire [63:0] fcount,     // free-running clk_f counter (clk_f domain)
 
     input  wire        en_s,       // run the tests
     input  wire        clr_s,      // hold test counters at zero
@@ -65,14 +66,9 @@ module cdc_tests #(
     u_clr_sync (.src_clk(clk_s), .src_in(clr_s), .dest_clk(clk_f), .dest_out(clr_f));
 
     // ---------------- free-running fast counter ----------------
-    reg [31:0] fcount;
-    always @(posedge clk_f) begin
-        if (rst_f) fcount <= 32'd0;
-        else       fcount <= fcount + 32'd1;
-    end
     assign heartbeat_f = fcount[28];  // ~0.75 Hz at 400 MHz
 
-    gray_count_xfer u_fcount_x (.src_clk(clk_f), .src_cnt(fcount), .dest_clk(clk_s), .dest_cnt(fast_count));
+    gray_count_xfer u_fcount_x (.src_clk(clk_f), .src_cnt(fcount[31:0]), .dest_clk(clk_s), .dest_cnt(fast_count));
 
     // ================= T1: 1-bit level, slow -> fast =================
     reg t1_src;
