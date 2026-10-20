@@ -1,0 +1,13 @@
+// Device-tree overlay loaded by xmutil/dfx-mgr along with the bitstream.
+// Same shape as the stock k26-starter-kits overlay: name the bitstream and
+// list the PL resets. pl_clk0 is already 100 MHz in the base device tree.
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	firmware-name = "cdc_lab.bit.bin";
+	resets = <&zynqmp_reset 116>, <&zynqmp_reset 117>,
+		 <&zynqmp_reset 118>, <&zynqmp_reset 119>;
+};
