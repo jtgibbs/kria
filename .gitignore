@@ -1,0 +1,45 @@
+# Vivado / Vitis HLS build output and generated IP
+build/
+hls_knn/
+.Xil/
+*.jou
+*.log
+*.str
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+*.srcs/
+*.xpr
+vivado_pid*.zip
+
+# Bitstreams and overlays
+*.bit
+*.bit.bin
+*.bin
+*.xsa
+*.dtbo
+
+# Compiled software and kernel modules
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+*.order
+
+# MNIST data (download separately, see README)
+data/
+*.gz
+*-ubyte
+
+# Python / editor / secrets
+__pycache__/
+*.pyc
+.env
+.env.*
+.vscode/
+.DS_Store

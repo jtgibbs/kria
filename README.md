@@ -10,6 +10,10 @@ everything from the previous step.
 | [`cdc_lab/`](cdc_lab) | Clock-domain crossings done wrong and done right, measured in hardware |
 | [`mnist_knn/`](mnist_knn) | MNIST k-NN classifier: HLS kernel in the fabric vs the A53 CPU, ~20× faster |
 
+**Approach.** Architecture, CDC strategy, test design, and failure predictions
+are mine; Claude Code accelerated RTL, scripting, and documentation. Every
+result was validated on hardware.
+
 ## 1. CDC lab
 
 A 100 MHz slow clock (also the AXI clock) and a fast clock about 4× faster,
@@ -129,3 +133,7 @@ mnist_knn/
   sw/           knn_cpu.c, knn_fpga.c, knn_common.h
   scripts/      prep_data.py, run_board.sh
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
